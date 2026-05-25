@@ -5,9 +5,6 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessageChunk, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deepagents.middleware.filesystem import FilesystemMiddleware
-from deepagents.backends.context_hub import ContextHubBackend
-
 from agent.tools import TOOLS
 from context import CONTEXT_HUB_REPO, get_prompt
 from utils.streaming import iter_text
@@ -32,8 +29,9 @@ def build_agent():
         model=ChatAnthropic(model=_model_id(), max_tokens=300),
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
-        # FilesystemMiddleware exposes ls/read_file/etc. backed by Context Hub.
-        middleware=[FilesystemMiddleware(backend=ContextHubBackend(CONTEXT_HUB_REPO))],
+        # No filesystem middleware — this is a chat surface; answers go in
+        # the assistant message stream. AGENTS.md is already loaded at
+        # import time via `get_prompt()` from Context Hub.
     )
 
 
