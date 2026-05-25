@@ -43,42 +43,52 @@ def run_agent_on_example(inputs: dict) -> dict:
 
 def run_evaluation(experiment_prefix: str) -> dict:
     from langsmith import evaluate
-    from evals.evaluators import assertion_evaluator
+    from evals.evaluators import (
+        tool_selection_evaluator,
+        scope_adherence_evaluator,
+    )
 
     print(f"\nRunning evaluation on dataset '{DATASET_NAME}'...")
 
+    demo_presenter = os.getenv("DEMO_PRESENTER", "robert")
     results = evaluate(
         run_agent_on_example,
         data=DATASET_NAME,
-        evaluators=[assertion_evaluator],
+        evaluators=[
+            tool_selection_evaluator,
+            scope_adherence_evaluator,
+        ],
         experiment_prefix=experiment_prefix,
-        metadata={"demo": "true", "demo_type": "chat-lc-lite"},
+        metadata={"demo": "true", "demo_type": "chat-lc-lite", "demo_presenter": demo_presenter},
     )
 
-    # One feedback per example: assertion_evaluator returns
-    # {key: "assertions_pass_rate", score: 0.0..1.0}. Overall is the mean
-    # across examples — i.e. the average fraction of assertions met.
-    per_example: list[float] = []
-    for result in results:
-        for ev in result.get("evaluation_results", {}).get("results", []):
-            if ev.score is None:
-                continue
-            per_example.append(ev.score)
+    score_buckets = {
+        "tool_selection": [],
+        "scope_adherence": [],
+    }
 
-    overall = sum(per_example) / len(per_example) if per_example else 0.0
-    n = len(per_example)
+    for result in results:
+        for eval_result in result.get("evaluation_results", {}).get("results", []):
+            if eval_result.key in score_buckets and eval_result.score is not None:
+                score_buckets[eval_result.key].append(eval_result.score)
+
+    scores = {}
     print(f"\nResults:")
-    print(f"  assertions_pass_rate  {overall:.2f}  (avg across {n} examples)")
-    return {"assertions_pass_rate": overall, "__overall__": overall}
+    for key, values in score_buckets.items():
+        avg = sum(values) / len(values) if values else 0.0
+        scores[key] = avg
+        print(f"  {key:<25} {avg:.2f} ({len(values)} examples)")
+
+    return scores
 
 
 def check_threshold(scores: dict, threshold: float) -> bool:
-    """Returns True if the overall assertion pass rate meets the threshold."""
-    overall = scores.get("__overall__", 0.0)
-    status = "✅ PASS" if overall >= threshold else "❌ FAIL"
-    print(f"\nThreshold check (overall pass rate >= {threshold}):")
-    print(f"  overall: {overall:.2f} {status}")
-    return overall >= threshold
+    """Returns True if tool_selection meets the threshold."""
+    avg = scores.get("tool_selection", 0.0)
+    status = "✅ PASS" if avg >= threshold else "❌ FAIL"
+    print(f"\nThreshold check (>= {threshold}):")
+    print(f"  tool_selection: {avg:.2f} {status}")
+    return avg >= threshold
 
 
 ONLINE_EVALUATORS = [
@@ -181,7 +191,8 @@ def main():
     parser.add_argument("--n-generated", type=int, default=8)
     parser.add_argument("--setup-online-eval", action="store_true")
     parser.add_argument("--threshold", type=float, default=None, help="Fail (exit 1) if avg score below this value")
-    parser.add_argument("--experiment-prefix", type=str, default=f"engine-chat-lc-lite-{DEMO_PRESENTER}")
+    demo_presenter = os.getenv("DEMO_PRESENTER", "robert")
+    parser.add_argument("--experiment-prefix", type=str, default=f"after-chat-lc-lite-{demo_presenter}")
     args = parser.parse_args()
 
     if not args.skip_dataset:
