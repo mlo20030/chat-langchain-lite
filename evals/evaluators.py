@@ -1,11 +1,6 @@
-"""Evaluators for the Chat LangChain Lite demo.
+"""Evaluators for the Chat LangChain Lite demo."""
 
-A single `assertion_evaluator` consumes each example's `assertions` list
-and produces one feedback row per assertion via LLM-as-judge. This matches
-the format Engine emits when proposing generated examples to a dataset,
-so anything Engine adds is scored the same way.
-"""
-
+import json
 from anthropic import Anthropic
 
 _anthropic_client = None
@@ -18,78 +13,67 @@ def _get_anthropic_client() -> Anthropic:
     return _anthropic_client
 
 
-def _judge_assertion(criterion: str, output: str, tools_called: list[str]) -> float:
-    """LLM-as-judge: does the agent response satisfy the criterion?
-
-    Returns 1.0 if 'yes', 0.0 otherwise.
-    """
+def _llm_judge(system_prompt: str, output: str) -> float:
     client = _get_anthropic_client()
-    system_prompt = (
-        "You are evaluating whether an AI agent's response satisfies a single, "
-        "specific assertion (success criterion).\n\n"
-        "You receive:\n"
-        "  - The assertion text (the criterion the response must meet)\n"
-        "  - The list of tools the agent called for this run (may be empty)\n"
-        "  - The agent's final response text\n\n"
-        "**Soft declines count as compliance.** For scope/decline-style "
-        "assertions (e.g. `must_decline_X`, `must_not_help_with_Y`), if the "
-        "response acknowledges the request is outside the LangChain ecosystem "
-        "AND redirects to LangChain-relevant help, treat the assertion as MET "
-        "— even if the response also offers to help with a LangChain-flavored "
-        "version of the question, asks for code in that in-scope context, or "
-        "suggests other resources. Only score 'no' when the response fully "
-        "engages with the off-topic content (provides the recipe, writes the "
-        "non-LangChain code, ranks third-party products, etc.) WITHOUT "
-        "declining first.\n\n"
-        "For non-decline assertions (factual correctness, tone, format), "
-        "judge strictly: the assertion must be clearly met.\n\n"
-        "Answer ONLY 'yes' if the response satisfies the assertion, or 'no' if it does not."
-    )
-    user_msg = (
-        f"Assertion: {criterion}\n\n"
-        f"Tools called: {', '.join(tools_called) if tools_called else '(none)'}\n\n"
-        f"Agent response:\n{output}\n\n"
-        "Does the response satisfy the assertion? Answer ONLY 'yes' or 'no'."
-    )
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=16,
         system=system_prompt,
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[{"role": "user", "content": (
+            f"Agent response: {output}\n\n"
+            "Answer ONLY 'yes' (score 1) or 'no' (score 0)."
+        )}],
     )
     answer = response.content[0].text.strip().lower()
     return 1.0 if answer.startswith("yes") else 0.0
 
 
-def assertion_evaluator(run, example) -> dict:
-    """Score per-example: fraction of assertions that pass (0.0 – 1.0).
+def tool_selection_evaluator(run, example) -> dict:
+    """Did the agent call a tool when the question was about the LangChain ecosystem?
 
-    Returns ONE feedback row per example with key `assertions_pass_rate`.
-    A score of 1.0 means every assertion passed; 0.5 means half; etc.
-    Smoother gradient than the previous all-or-nothing flag — single
-    failed assertion doesn't black-hole the whole example's score.
+    Score: 1 = tools were called, or question was not LangChain-related (no tool needed)
+           0 = LangChain ecosystem question answered from memory without calling any tool
+    """
+    question = (example.inputs or {}).get("question", "") if example else ""
+    full_output = json.dumps(run.outputs or {})
+    trajectory = f"Question: {question}\n\nAgent output: {full_output}"
+    system_prompt = (
+        "You are grading a LangChain ecosystem assistant that has tools for concept lookup, "
+        "setup guides, and best-practice/security advice.\n\n"
+        "Look at the tools_called field in the agent output.\n"
+        "Score 'yes' if tools_called is non-empty (agent used tools).\n"
+        "Score 'yes' if tools_called is empty AND the question is NOT about the LangChain "
+        "ecosystem (LangChain, LangGraph, LangSmith, Deep Agents) — correct refusal, no tools needed.\n"
+        "Score 'no' if tools_called is empty AND the question IS about the LangChain ecosystem "
+        "— the agent should have called a tool."
+    )
+    client = _get_anthropic_client()
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=16,
+        system=system_prompt,
+        messages=[{"role": "user", "content": trajectory + "\n\nAnswer ONLY 'yes' (score 1) or 'no' (score 0)."}],
+    )
+    answer = response.content[0].text.strip().lower()
+    return {"key": "tool_selection", "score": 1.0 if answer.startswith("yes") else 0.0}
 
-    The per-assertion ✓/✗ breakdown is stuffed into the `comment` field so
-    the trace's feedback panel still shows which specific assertion failed.
+
+def scope_adherence_evaluator(run, example) -> dict:
+    """LLM-as-judge: did the agent stay on LangChain ecosystem topics?
+
+    Score: 1 = correctly declined non-ecosystem questions or stayed on topic
+           0 = answered questions unrelated to LangChain, LangGraph, LangSmith, or Deep Agents
     """
     output = (run.outputs or {}).get("output") or ""
-    tools_called = (run.outputs or {}).get("tools_called") or []
-    assertions = (example.outputs or {}).get("assertions") or []
-
-    if not assertions:
-        return {"key": "assertions_pass_rate", "score": 0.0, "comment": "(no assertions defined)"}
-
-    per_assertion = []
-    for a in assertions:
-        key = a.get("key", "assertion")
-        score = _judge_assertion(a.get("comment", ""), output, tools_called)
-        per_assertion.append((key, score))
-
-    passed = sum(1 for _, s in per_assertion if s == 1.0)
-    total = len(per_assertion)
-    breakdown = " | ".join(f"{k}={'✓' if s == 1.0 else '✗'}" for k, s in per_assertion)
-    return {
-        "key": "assertions_pass_rate",
-        "score": passed / total,
-        "comment": f"{passed}/{total} passed — {breakdown}",
-    }
+    system_prompt = (
+        "You are evaluating whether a LangChain ecosystem assistant stayed on topic.\n\n"
+        "The assistant should only answer questions about the LangChain ecosystem: "
+        "LangChain, LangGraph, LangSmith, and Deep Agents. It should decline or redirect "
+        "questions about unrelated frameworks, general programming topics unrelated to these "
+        "tools, or other AI providers.\n\n"
+        "Score 'yes' if the agent answered a LangChain ecosystem question OR correctly declined "
+        "an out-of-scope question (even a soft redirect counts as correct).\n"
+        "Score 'no' if the agent fully engaged with content unrelated to the LangChain ecosystem "
+        "without declining first."
+    )
+    return {"key": "scope_adherence", "score": _llm_judge(system_prompt, output)}
