@@ -2,7 +2,7 @@
 
 Resets the demo to a clean state so it can be run again without re-running setup:
   1. Resets dataset to the original 3 examples (deletes Engine-added examples)
-  2. Deletes all experiments — CI/CD generates fresh before/after on every PR
+  2. Deletes CI/Engine experiments (keeps the baseline-* seeds from setup.py)
   3. Removes Engine-added online evaluators (keeps the 5 registered by setup.py)
   4. Re-seeds Context Hub (AGENTS.md + demo skills) to the buggy baseline,
      restoring the prompt if it was fixed in the Context Hub UI during the demo
@@ -71,22 +71,30 @@ def reset_dataset() -> None:
 # ── 2. Delete 'after' experiments ─────────────────────────────────────────────
 
 def delete_ci_experiments() -> None:
-    """Delete all experiments linked to the dataset.
+    """Delete CI/Engine experiments linked to the dataset.
 
-    CI/CD generates fresh before/after experiments on every PR, so there is
-    no experiment worth keeping between demos.
+    CI/CD generates fresh before/after experiments on every PR, so those are
+    not worth keeping between demos. The `baseline-*` experiments seeded by
+    setup.py ARE preserved: they're the demo's Haiku-vs-Sonnet "before"
+    reference and would otherwise have to be reseeded after every cleanup.
     """
     from langsmith import Client
 
-    print(f"\n[2/3] Removing all experiments from demo datasets...")
+    print(f"\n[2/3] Removing CI/Engine experiments (keeping baseline seeds)...")
     ls_client = Client()
     total_deleted = 0
+    total_kept = 0
     for name in (DATASET_NAME, TOOL_ADHERENCE_DATASET_NAME):
         datasets = list(ls_client.list_datasets(dataset_name=name))
         if not datasets:
             continue
         experiments = list(ls_client.list_projects(reference_dataset_id=datasets[0].id))
         for exp in experiments:
+            # Preserve the baseline-* seeds setup.py creates (the Haiku/Sonnet
+            # "before" reference); only sweep CI/Engine experiments.
+            if exp.name.startswith("baseline-"):
+                total_kept += 1
+                continue
             for attempt in range(3):
                 try:
                     ls_client.delete_project(project_name=exp.name)
@@ -99,7 +107,7 @@ def delete_ci_experiments() -> None:
                     else:
                         print(f"  Failed to delete '{exp.name}': {e}")
                         break
-    print(f"  Deleted {total_deleted} experiment(s) across both datasets.")
+    print(f"  Deleted {total_deleted} experiment(s), kept {total_kept} baseline seed(s).")
 
 
 # ── 3. Delete Engine-added online evaluators ───────────────────────────────────
